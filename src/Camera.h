@@ -9,6 +9,9 @@
 #include "RefCounted.h"
 #include "graphics/Frustum.h"
 #include "graphics/Light.h"
+#include "graphics/Texture.h"
+#include "graphics/VertexBuffer.h"
+#include "graphics/RenderTarget.h"
 #include "matrix4x4.h"
 #include "vector3.h"
 
@@ -182,6 +185,10 @@ private:
 	// For interior check
 	std::vector<Body*> m_spaceStations;
 	std::vector<LightSource> m_lightSources;
+
+	std::unique_ptr<Graphics::RenderTarget> m_worldTarget;
+	std::unique_ptr<Graphics::MeshObject> m_worldMesh;
+	std::unique_ptr<Graphics::Material> m_worldMat;
 };
 
 #endif

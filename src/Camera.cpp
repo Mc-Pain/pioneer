@@ -115,19 +115,45 @@ Camera::Camera(RefCountedPtr<CameraContext> context, Graphics::Renderer *rendere
 	m_context(context),
 	m_renderer(renderer)
 {
-	Graphics::MaterialDescriptor desc;
-	desc.textures = 1;
+	{
+		Graphics::MaterialDescriptor desc;
+		desc.textures = 1;
 
-	Graphics::RenderStateDesc rsd;
-	rsd.blendMode = Graphics::BLEND_ALPHA_ONE;
-	rsd.depthWrite = false;
-	rsd.primitiveType = Graphics::POINTS;
+		Graphics::RenderStateDesc rsd;
+		rsd.blendMode = Graphics::BLEND_ALPHA_ONE;
+		rsd.depthWrite = false;
+		rsd.primitiveType = Graphics::POINTS;
 
-	Graphics::VertexFormatDesc vfmt = Graphics::VertexFormatDesc::FromAttribSet(Graphics::ATTRIB_POSITION | Graphics::ATTRIB_NORMAL);
+		Graphics::VertexFormatDesc vfmt = Graphics::VertexFormatDesc::FromAttribSet(Graphics::ATTRIB_POSITION | Graphics::ATTRIB_NORMAL);
 
-	m_billboardMaterial.reset(m_renderer->CreateMaterial("billboards", desc, rsd, vfmt));
-	m_billboardMaterial->SetTexture("texture0"_hash,
-		Graphics::TextureBuilder::Billboard("textures/planet_billboard.dds").GetOrCreateTexture(m_renderer, "billboard"));
+		m_billboardMaterial.reset(m_renderer->CreateMaterial("billboards", desc, rsd, vfmt));
+		m_billboardMaterial->SetTexture("texture0"_hash,
+			Graphics::TextureBuilder::Billboard("textures/planet_billboard.dds").GetOrCreateTexture(m_renderer, "billboard"));
+	}
+
+	m_worldTarget.reset(m_renderer->CreateRenderTarget(m_renderer->GetRenderTarget()->GetDesc()));
+
+	int w = m_renderer->GetWindowWidth() / 2;
+	int h = m_renderer->GetWindowHeight() / 2;
+	Graphics::VertexArray vertices(Graphics::ATTRIB_POSITION | Graphics::ATTRIB_UV0);
+	vertices.Add(vector3f(0.f,   h, 0.f), vector2f(0.f, 0.f));
+	vertices.Add(vector3f(  w,   h, 0.f), vector2f(1.f, 0.f));
+	vertices.Add(vector3f(0.f, 0.f, 0.f), vector2f(0.f, 1.f));
+	vertices.Add(vector3f(  w, 0.f, 0.f), vector2f(1.f, 1.f));
+	m_worldMesh.reset(m_renderer->CreateMeshObjectFromArray(&vertices));
+
+	{
+		Graphics::MaterialDescriptor desc;
+		desc.textures = 1;
+
+		Graphics::RenderStateDesc rsd;
+		rsd.primitiveType = Graphics::TRIANGLE_STRIP;
+		rsd.blendMode = Graphics::BLEND_ALPHA;
+		rsd.cullMode = Graphics::CULL_NONE;
+
+		m_worldMat.reset(m_renderer->CreateMaterial("test", desc, rsd, m_worldMesh->GetFormat()));
+		//m_worldMat->SetTexture("texture0"_hash, Graphics::TextureBuilder::Model("textures/high.dds").GetOrCreateTexture(Pi::renderer, "model"));
+	}
 }
 
 static void position_system_lights(Frame *camFrame, Frame *frame, std::vector<Camera::LightSource> &lights)
@@ -278,37 +304,6 @@ void Camera::Draw(const Body *excludeBody)
 		m_lightSources.push_back(LightSource(0, light));
 	}
 
-	//fade space background based on atmosphere thickness and light angle
-	float bgIntensity = 1.f;
-	Frame *camParent = Frame::GetFrame(camFrame->GetParent());
-	if (camParent && camParent->IsRotFrame()) {
-		//check if camera is near a planet
-		Body *camParentBody = camParent->GetBody();
-		if (camParentBody && camParentBody->IsType(ObjectType::PLANET)) {
-			Planet *planet = static_cast<Planet *>(camParentBody);
-			const vector3f relpos(planet->GetInterpPositionRelTo(camFrameId));
-			double altitude(relpos.Length());
-			double pressure, density;
-			planet->GetAtmosphericState(altitude, &pressure, &density);
-			if (pressure >= 0.001) {
-				//go through all lights to calculate something resembling light intensity
-				float intensity = 0.f;
-				const Body *pBody = Pi::game->GetPlayer();
-				for (Uint32 i = 0; i < m_lightSources.size(); i++) {
-					// Set up data for eclipses. All bodies are assumed to be spheres.
-					const LightSource &it = m_lightSources[i];
-					const vector3f lightDir(it.GetLight().GetPosition().Normalized());
-					intensity += ShadowedIntensity(i, pBody) * std::max(0.f, lightDir.Dot(-relpos.Normalized())) * (it.GetLight().GetDiffuse().GetLuminance() / 255.0f);
-				}
-				intensity = Clamp(intensity, 0.0f, 1.0f);
-
-				//calculate background intensity with some hand-tweaked fuzz applied
-				bgIntensity = Clamp(1.f - std::min(1.f, powf(density, 0.25f)) * (0.3f + powf(intensity, 0.25f)), 0.f, 1.f);
-			}
-		}
-	}
-
-	Pi::game->GetSpace()->GetBackground()->SetIntensity(bgIntensity);
 	Pi::game->GetSpace()->GetBackground()->Draw(trans2bg);
 
 	{
@@ -329,6 +324,9 @@ void Camera::Draw(const Body *excludeBody)
 
 	Graphics::VertexArray billboards(Graphics::ATTRIB_POSITION | Graphics::ATTRIB_NORMAL);
 
+	RenderTarget* oldTarget = m_renderer->GetRenderTarget();
+	m_renderer->SetRenderTarget(m_worldTarget.get());
+
 	for (std::list<BodyAttrs>::iterator i = m_sortedBodies.begin(); i != m_sortedBodies.end(); ++i) {
 		BodyAttrs *attrs = &(*i);
 
@@ -345,6 +343,16 @@ void Camera::Draw(const Body *excludeBody)
 		PrepareLighting(attrs->body, attrs->calcAtmosphereLighting, attrs->calcInteriorLighting);
 		attrs->body->Render(m_renderer, this, attrs->viewCoords, attrs->viewTransform);
 	}
+
+	m_renderer->SetRenderTarget(oldTarget);
+	m_renderer->SetProjection(matrix4x4f::OrthoFrustum(0, m_renderer->GetWindowWidth(), m_renderer->GetWindowHeight(), 0, 0, 1));
+	m_renderer->SetTransform(matrix4x4f::Identity);
+
+	m_worldMat->SetTexture("texture0"_hash, m_worldTarget->GetColorTexture());
+	m_renderer->DrawMesh(m_worldMesh.get(), m_worldMat.get());
+
+	m_renderer->SetProjection(m_context->GetProjectionMatrix());
+	m_renderer->SetTransform(matrix4x4f::Identity);
 
 	RestoreLighting();
 
